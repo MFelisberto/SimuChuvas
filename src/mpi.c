@@ -41,8 +41,9 @@ static long sampled_rows(long a, long b, long F)   /* linhas múltiplas de F em 
     return first >= b ? 0 : (b - 1 - first) / F + 1;
 }
 
-static void anim_open(Anim *A, const Params *p, int rank, int np, long r0, long nr)
+static void anim_open(Anim *A, const Params *p, int rank, int np, const long *inicio)
 {
+    long r0 = inicio[rank], nr = inicio[rank + 1] - inicio[rank];
     long R = p->rows, C = p->cols;
     A->F = ((R > C ? R : C) + 899) / 900;          /* quadro com no máximo ~900 px */
     A->rs = (R + A->F - 1) / A->F;
@@ -60,7 +61,7 @@ static void anim_open(Anim *A, const Params *p, int rank, int np, long r0, long 
         int64_t hdr[6] = { A->rs, A->cs, A->F, R, C, np };
         fwrite("FLOODANI", 1, 8, A->f); fwrite(hdr, 8, 6, A->f);
         for (int r = 0; r < np; r++) {
-            long a = (long)r * R / np, b = (long)(r + 1) * R / np;
+            long a = inicio[r], b = inicio[r + 1];
             int64_t start = a;
             fwrite(&start, 8, 1, A->f);
             A->cnt[r] = (int)(sampled_rows(a, b, A->F) * A->cs);
@@ -95,6 +96,42 @@ static void anim_close(Anim *A)
     free(A->buf); free(A->all); free(A->cnt); free(A->dsp);
 }
 
+/*
+ * Divide as R linhas do mapa em np faixas consecutivas.
+ *   igual (padrão): o mesmo número de linhas em cada faixa;
+ *   balanceada (-b): o mesmo número de CÉLULAS COM DADO em cada faixa. Linhas com muito
+ *   oceano ou país vizinho ("sem dado", que quase não custam nada) ficam em faixas mais
+ *   altas, e linhas só com terra em faixas mais baixas.
+ * Cada linha pesa (células com dado + 1), para linhas vazias também serem distribuídas.
+ */
+static void divide_faixas(const float *Z, long R, long C, int np, int balance, long *inicio)
+{
+    inicio[0] = 0; inicio[np] = R;
+    if (!balance) {
+        for (int r = 1; r < np; r++) inicio[r] = (long)r * R / np;
+        return;
+    }
+    double total = 0;
+    double *peso = malloc(sizeof(double) * R);
+    for (long i = 0; i < R; i++) {
+        long n = 0;
+        for (long j = 0; j < C; j++) n += (Z[i * C + j] > NODATA_Z);
+        peso[i] = (double)n + 1.0;
+        total += peso[i];
+    }
+    double acum = 0;
+    long i = 0;
+    for (int r = 1; r < np; r++) {
+        double alvo = total * r / np;              /* a faixa r começa quando o acumulado passa daqui */
+        while (i < R && acum + peso[i] <= alvo) acum += peso[i++];
+        long min_i = inicio[r - 1] + 1;            /* toda faixa tem pelo menos 1 linha */
+        long max_i = R - (np - r);                 /* e sobra pelo menos 1 linha para cada faixa seguinte */
+        inicio[r] = i < min_i ? min_i : (i > max_i ? max_i : i);
+        while (i < inicio[r]) acum += peso[i++];
+    }
+    free(peso);
+}
+
 int main(int argc, char **argv)
 {
     MPI_Init(&argc, &argv);
@@ -110,9 +147,26 @@ int main(int argc, char **argv)
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
 
+    /* um "tipo linha" para as contagens de Scatterv/Gatherv não estourarem int */
+    MPI_Datatype row_t;
+    MPI_Type_contiguous((int)C, MPI_FLOAT, &row_t);
+    MPI_Type_commit(&row_t);
+
+    /* O processo 0 lê o mapa do RS (fora da medição de tempo) e decide onde cada faixa
+     * começa: inicio[r] = primeira linha do processo r; inicio[np] = R. */
+    float *all = NULL;
+    long *inicio = malloc(sizeof(long) * (np + 1));
+    if (rank == 0) {
+        all = malloc(sizeof(float) * R * C);
+        if (!all) MPI_Abort(MPI_COMM_WORLD, 2);
+        dem_read_all(p.dem_path, all, R, C);
+        divide_faixas(all, R, C, np, p.balance, inicio);
+    }
+    MPI_Bcast(inicio, np + 1, MPI_LONG, 0, MPI_COMM_WORLD);
+
     /* faixa de linhas deste processo: [r0, r0+nr) */
-    long r0 = (long)rank * R / np;
-    long nr = (long)(rank + 1) * R / np - r0;
+    long r0 = inicio[rank];
+    long nr = inicio[rank + 1] - r0;
 
     float *Z = malloc(sizeof(float) * nr * C);
     float *W = malloc(sizeof(float) * nr * C);
@@ -120,28 +174,14 @@ int main(int argc, char **argv)
     float *ntop = malloc(sizeof(float) * C), *nbot = malloc(sizeof(float) * C);
     if (!Z || !W || !gtop || !gbot || !ntop || !nbot) MPI_Abort(MPI_COMM_WORLD, 2);
 
-    /* um "tipo linha" para as contagens de Scatterv/Gatherv não estourarem int */
-    MPI_Datatype row_t;
-    MPI_Type_contiguous((int)C, MPI_FLOAT, &row_t);
-    MPI_Type_commit(&row_t);
     int *counts = malloc(sizeof(int) * np), *displs = malloc(sizeof(int) * np);
     for (int r = 0; r < np; r++) {
-        displs[r] = (int)((long)r * R / np);
-        counts[r] = (int)((long)(r + 1) * R / np - displs[r]);
+        displs[r] = (int)inicio[r];
+        counts[r] = (int)(inicio[r + 1] - inicio[r]);
     }
-
-    /* Distribuição do trabalho (fora da medição de tempo): o processo 0 lê o mapa
-     * do RS e entrega a cada processo a sua faixa de linhas (norte -> sul). */
-    {
-        float *all = NULL;
-        if (rank == 0) {
-            all = malloc(sizeof(float) * R * C);
-            if (!all) MPI_Abort(MPI_COMM_WORLD, 2);
-            dem_read_all(p.dem_path, all, R, C);
-        }
-        MPI_Scatterv(all, counts, displs, row_t, Z, (int)nr, row_t, 0, MPI_COMM_WORLD);
-        free(all);
-    }
+    /* entrega a cada processo a sua faixa (norte -> sul) */
+    MPI_Scatterv(all, counts, displs, row_t, Z, (int)nr, row_t, 0, MPI_COMM_WORLD);
+    free(all);
     init_water(W, Z, r0, nr, &p);
 
     int up   = (rank > 0)      ? rank - 1 : MPI_PROC_NULL;
@@ -154,7 +194,7 @@ int main(int argc, char **argv)
 
     Anim A;
     if (p.anim_path) {
-        anim_open(&A, &p, rank, np, r0, nr);
+        anim_open(&A, &p, rank, np, inicio);
         anim_frame(&A, 0, W, Z, r0, C);           /* quadro 0: estado inicial */
     }
 
@@ -212,15 +252,31 @@ int main(int argc, char **argv)
     MPI_Reduce(&s.volume, &g.volume, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
     MPI_Reduce(&s.max_depth, &g.max_depth, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
 
-    double tm[4] = { t_total, t_local, t_check, t_exch }, tmax[4];
+    double tm[4] = { t_total, t_local, t_check, t_exch }, tmax[4], soma_local;
     MPI_Reduce(tm, tmax, 4, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&t_local, &soma_local, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    /* desbalanceamento (mesma métrica do T1/T2): quanto a faixa mais lenta excede a média */
+    double media_local = soma_local / np;
+    double desbal = media_local > 0 ? 100.0 * (tmax[1] - media_local) / media_local : 0.0;
+
+    if (p.verbose) {                    /* -v: uma linha por processo, para o gráfico de carga */
+        double eu[4] = { (double)r0, (double)nr, t_local, (double)rows_visited }, *todos = NULL;
+        if (rank == 0) todos = malloc(sizeof(double) * 4 * np);
+        MPI_Gather(eu, 4, MPI_DOUBLE, todos, 4, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        if (rank == 0) {
+            printf("# rank,linha_inicial,linhas,t_local,linhas_visitadas\n");
+            for (int r = 0; r < np; r++)
+                printf("# %d,%.0f,%.0f,%.4f,%.0f\n", r, todos[4*r], todos[4*r+1], todos[4*r+2], todos[4*r+3]);
+            free(todos);
+        }
+    }
     long sw_total;
     MPI_Reduce(&rows_visited, &sw_total, 1, MPI_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
 
     if (rank == 0) {
         print_header();
         print_result("mpi", np, &p, rounds, sw_total,
-                     tmax[0], tmax[1], tmax[2], tmax[3], &g);
+                     tmax[0], tmax[1], tmax[2], tmax[3], desbal, &g);
     }
 
     if (p.out_path) {
@@ -234,7 +290,7 @@ int main(int argc, char **argv)
     if (p.anim_path) anim_close(&A);
     MPI_Type_free(&row_t);
     free(Z); free(W); free(gtop); free(gbot); free(ntop); free(nbot);
-    free(counts); free(displs); free(dirty);
+    free(counts); free(displs); free(dirty); free(inicio);
     MPI_Finalize();
     return 0;
 }

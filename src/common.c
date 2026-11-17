@@ -17,7 +17,10 @@ static void usage(const char *prog)
         "  -e eps    desnível mínimo de escoamento (padrão 0)\n"
         "  -o f      grava as profundidades (float32) para o tools/render.py\n"
         "  -a f      grava um quadro por rodada para a animação (tools/animar.py)\n"
-        "  -k n      no máximo n varreduras por rodada na Fase 1 (padrão: até estabilizar;\n"
+        "  -b        divisão balanceada: faixas com o mesmo número de células com dado\n"
+        "            (padrão: faixas com o mesmo número de linhas)\n"
+        "  -v        imprime a faixa, o tempo e o trabalho de cada processo\n"
+        "  -k n      no máximo n varreduras por rodada na Fase 1 (0 = até estabilizar;\n"
         "            com -a, o padrão vira 1, para a animação mostrar o passo a passo)\n",
         prog);
     exit(1);
@@ -25,11 +28,11 @@ static void usage(const char *prog)
 
 void parse_args(int argc, char **argv, Params *p)
 {
-    p->dem_path = "dados/rs.dem"; p->out_path = NULL; p->anim_path = NULL; p->max_sweeps = -1; p->level = -INFINITY; p->eps = 0.0f;
+    p->dem_path = "dados/rs.dem"; p->out_path = NULL; p->anim_path = NULL; p->max_sweeps = -1; p->balance = 0; p->verbose = 0; p->level = -INFINITY; p->eps = 0.0f;
     /* Aceita as opções antes ou depois do nome do mapa. (O getopt do macOS para no
      * primeiro argumento que não é opção; aqui ele é guardado e a leitura continua.) */
     while (optind < argc) {
-        int c = getopt(argc, argv, "L:e:o:a:k:h");
+        int c = getopt(argc, argv, "L:e:o:a:k:bvh");
         if (c == -1) { p->dem_path = argv[optind++]; continue; }
         switch (c) {
         case 'L': p->level = (float)atof(optarg); break;
@@ -37,6 +40,8 @@ void parse_args(int argc, char **argv, Params *p)
         case 'o': p->out_path = optarg; break;
         case 'a': p->anim_path = optarg; break;
         case 'k': p->max_sweeps = atoi(optarg); break;
+        case 'b': p->balance = 1; break;
+        case 'v': p->verbose = 1; break;
         default:  usage(argv[0]);
         }
     }
@@ -203,18 +208,19 @@ void stats_rows(const float *W, const float *Z, long r0, long nr, long cols, Sta
 
 void print_header(void)
 {
-    printf("versao,np,linhas,colunas,rodadas,trabalho,"
-           "t_total,t_local,t_verif,t_troca,checksum,inundadas,volume,prof_max\n");
+    printf("versao,np,k,divisao,linhas,colunas,rodadas,trabalho,"
+           "t_total,t_local,t_verif,t_troca,desbal,checksum,inundadas,volume,prof_max\n");
 }
 
 void print_result(const char *version, int np, const Params *p,
                   long rounds, long rows_visited,
                   double t_total, double t_local, double t_check, double t_exch,
-                  const Stats *s)
+                  double desbal, const Stats *s)
 {
-    printf("%s,%d,%ld,%ld,%ld,%.2f,%.4f,%.4f,%.4f,%.4f,%016llx,%ld,%.6e,%.3f\n",
-           version, np, p->rows, p->cols, rounds, (double)rows_visited / p->rows,
-           t_total, t_local, t_check, t_exch,
+    printf("%s,%d,%d,%s,%ld,%ld,%ld,%.2f,%.4f,%.4f,%.4f,%.4f,%.2f,%016llx,%ld,%.6e,%.3f\n",
+           version, np, p->max_sweeps, p->balance ? "balanceada" : "igual",
+           p->rows, p->cols, rounds, (double)rows_visited / p->rows,
+           t_total, t_local, t_check, t_exch, desbal,
            (unsigned long long)s->checksum, s->flooded, s->volume, s->max_depth);
     fflush(stdout);
 }

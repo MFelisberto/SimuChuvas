@@ -84,7 +84,9 @@ mpirun -np 4 ./mpi dados/rs.dem -o dados/rs.dep   # também grava as profundidad
 | `-e eps` | desnível mínimo para a água andar (padrão 0) |
 | `-o arq.dep` | grava a profundidade da água em cada célula, para o `render.py` |
 | `-a arq.anim` | grava um quadro por rodada, para a animação (`tools/animar.py`) |
-| `-k n` | no máximo `n` varreduras por rodada na Fase 1 (padrão: até a faixa estabilizar; com `-a`, o padrão vira 1) |
+| `-k n` | no máximo `n` varreduras por rodada na Fase 1 (`0` = até a faixa estabilizar, o padrão; com `-a`, o padrão vira 1). Na atlantica, `-k 2` foi o melhor |
+| `-b` | divisão **balanceada**: faixas com o mesmo número de células com dado, em vez do mesmo número de linhas |
+| `-v` | imprime a faixa, o tempo da Fase 1 e o trabalho de cada processo (para o gráfico de carga) |
 
 ### 4. Gerar as figuras
 
@@ -183,17 +185,23 @@ Se o mapa mudar, rode `make partes` no seu computador para regerar as partes e f
    ```bash
    rsync -av --exclude anadem_rs.tif --exclude '*.dep' --exclude '*.anim' alagamento USUARIO@ENDERECO:~/
    ```
-2. No `run_grid.sh`, ajustar a partição (`#SBATCH --partition`) e o jeito de chamar o `mpirun`
-   (o mesmo que funcionou no T2). Conferir com `lscpu` se os nós têm 8 núcleos físicos e 16 threads (HT).
-3. Submeter: `sbatch run_grid.sh`. Os resultados vão para `resultados/resultados_<job>.csv`.
+2. O `run_grid.sh` já está configurado para a atlantica (partição `LAD_geral`, Open MPI 4.1.1,
+   4 nós de 8 núcleos físicos / 16 threads).
+3. Submeter: `sbatch run_grid.sh`. Os resultados vão para `resultados/resultados_<job>.csv`, e a
+   carga de cada processo para `resultados/carga_<job>.txt`.
 
-O script compila, roda cada configuração 3 vezes (mude com `REPS=5 sbatch run_grid.sh`) e mede:
+O script compila, remonta o mapa, roda cada configuração 3 vezes (mude com `REPS=5 sbatch run_grid.sh`)
+e grava a coluna `experimento`:
 
-| Processos | Distribuição nos 4 nós |
+| Experimento | O que mede |
 |---|---|
-| 1 | 1 processo: a base do speedup |
-| 4, 8, 16, 32 | 1, 2, 4 e 8 por nó (8 por nó = todos os núcleos físicos) |
-| 64 | 16 por nó, usando o HT (2 processos por núcleo físico) |
+| `escala` | 1 processo (base do speedup) e 4, 8, 16, 32 e 64 processos com divisão balanceada e `k = 2` |
+| `divisao` | 32 e 64 processos com divisão **igual** (mesmo número de linhas), para comparar com a balanceada |
+| `k` | 32 processos, divisão balanceada, com `k` = 0 (sem limite), 1, 4, 8 e 16 |
+
+Distribuição nos 4 nós: com até 32 processos, N/4 por nó, um por núcleo físico (`--map-by ppr:N:node
+--bind-to core`); com 64, 16 por nó, dois por núcleo físico (HT). Ranks consecutivos ficam no mesmo
+nó, para que só 3 fronteiras entre faixas passem pela rede.
 
 ---
 
@@ -311,12 +319,14 @@ Usem a média das repetições de cada configuração.
 ## Saída (uma linha CSV por execução)
 
 ```
-versao,np,linhas,colunas,rodadas,trabalho,t_total,t_local,t_verif,t_troca,checksum,inundadas,volume,prof_max
+versao,np,k,divisao,linhas,colunas,rodadas,trabalho,t_total,t_local,t_verif,t_troca,desbal,checksum,inundadas,volume,prof_max
 ```
 
 | Coluna | Significado |
 |---|---|
 | `np` | número de processos |
+| `k` | máximo de varreduras por rodada (`0` = sem limite) |
+| `divisao` | `igual` (mesmo número de linhas por faixa) ou `balanceada` (mesmo número de células com dado) |
 | `linhas`, `colunas` | tamanho do mapa |
 | `rodadas` | quantas vezes o laço de fases (1 → 2 → 3) rodou |
 | `trabalho` | linhas processadas ÷ linhas do mapa = trabalho total em "varreduras completas do mapa". Comparado com o de 1 processo, mostra o trabalho extra causado pela divisão em faixas |
@@ -324,6 +334,7 @@ versao,np,linhas,colunas,rodadas,trabalho,t_total,t_local,t_verif,t_troca,checks
 | `t_local` | tempo na fase 1 |
 | `t_verif` | tempo na fase 2; **inclui a espera pelas faixas mais lentas** (desbalanceamento: faixas com mais várzea e lagoa dão mais trabalho) |
 | `t_troca` | tempo na fase 3 |
+| `desbal` | desbalanceamento, a mesma métrica do T1/T2: quanto o maior `t_local` excede a média, em % (0% = perfeito) |
 | `checksum` | impressão digital do resultado; **tem que ser igual para qualquer número de processos** |
 | `inundadas` | células com água presa |
 | `volume` | soma das profundidades (m × célula) |

@@ -1,57 +1,61 @@
 #!/bin/bash
-# run_grid.sh — bateria de medições no cluster (4 nós).
+# run_grid.sh — bateria de medições na atlantica (4 nós, 8 núcleos físicos / 16 threads por nó).
 #
-#   sbatch run_grid.sh                 # roda tudo e grava resultados/resultados_<jobid>.csv
+#   sbatch run_grid.sh                 # grava resultados/resultados_<jobid>.csv
+#   REPS=5 sbatch run_grid.sh          # 5 repetições em vez de 3
 #
-# AJUSTEM antes de rodar: partição/fila e a forma de chamar o MPI usadas no LAD
-# (o mesmo jeito que funcionou no T2). Os parâmetros abaixo assumem OpenMPI e nós
-# com 8 núcleos físicos / 16 threads de hardware (HT) — confiram com `lscpu` num nó.
-#
-#SBATCH --job-name=alagamento
+#SBATCH --job-name=simuchuvas
+#SBATCH --partition=LAD_geral
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=16
 #SBATCH --exclusive
 #SBATCH --time=02:00:00
-#SBATCH --output=alagamento_%j.out
-##SBATCH --partition=grid          # <- descomentem/ajustem o nome da partição
+#SBATCH --output=simuchuvas_%j.out
 
 set -u
 cd "$SLURM_SUBMIT_DIR"
 make -s mpi
-
-REPS=${REPS:-3}                             # repetições de cada configuração
-mkdir -p resultados
-OUT=resultados/resultados_${SLURM_JOB_ID:-local}.csv
-
-# Entradas medidas: o mapa do RS (gerem antes com tools/prepare_dem.py).
-#  - dados/rs.dem   : RS inteiro, células de ~60 m (~170 M células)
-#  - dados/rs30.dem : RS inteiro, células de ~30 m (~690 M células), se existir:
-#                     python3 tools/prepare_dem.py --res 30 -o dados/rs30.dem
 make -s dados                               # remonta o dados/rs.dem a partir das partes do repositório
-INPUTS=("dados/rs.dem")
-[ -f dados/rs30.dem ] && INPUTS+=("dados/rs30.dem")
 [ -f dados/rs.dem ] || { echo "falta dados/rs.dem"; exit 1; }
 
-echo "entrada,rep,versao,np,linhas,colunas,rodadas,trabalho,t_total,t_local,t_verif,t_troca,checksum,inundadas,volume,prof_max" > "$OUT"
+REPS=${REPS:-3}                             # repetições de cada configuração
+MAPA=dados/rs.dem
+mkdir -p resultados
+OUT=resultados/resultados_${SLURM_JOB_ID:-local}.csv
+CARGA=resultados/carga_${SLURM_JOB_ID:-local}.txt
 
-run() {   # run <entrada> <rep> <comando...>
-  local inp="$1" rep="$2"; shift 2
-  "$@" $inp | tail -1 | sed "s|^|\"$inp\",$rep,|" >> "$OUT"
+# Como espalhar N processos pelos 4 nós: ranks consecutivos no mesmo nó (as faixas vizinhas
+# trocam bordas, então assim só 3 fronteiras passam pela rede).
+#   até 32: N/4 por nó, um por núcleo físico;   64: 16 por nó, dois por núcleo físico (HT).
+mapa_de() {
+  if [ "$1" -le 32 ]; then echo "--map-by ppr:$(( $1 / 4 )):node --bind-to core"
+  else echo "--map-by ppr:16:node --bind-to hwthread --use-hwthread-cpus"; fi
 }
 
-for inp in "${INPUTS[@]}"; do
-  for rep in $(seq 1 "$REPS"); do
-    # 1 processo (base do speedup): o mapa inteiro num bloco só, sem paralelismo
-    run "$inp" "$rep" mpirun -np 1 ./mpi
+echo "experimento,rep,versao,np,k,divisao,linhas,colunas,rodadas,trabalho,t_total,t_local,t_verif,t_troca,desbal,checksum,inundadas,volume,prof_max" > "$OUT"
 
-    # MPI com 4, 8, 16 e 32 processos, espalhados igualmente pelos 4 nós
-    # (1, 2, 4 e 8 por nó; 8 por nó = todos os núcleos físicos)
-    for np in 4 8 16 32; do
-      run "$inp" "$rep" mpirun -np $np --map-by ppr:$((np / 4)):node --bind-to core ./mpi
-    done
-    # MPI com 64 processos = 16 por nó (usa o HT: 2 processos por núcleo físico)
-    run "$inp" "$rep" mpirun -np 64 --map-by ppr:16:node --bind-to hwthread --use-hwthread-cpus ./mpi
-  done
+run() {   # run <experimento> <rep> <np> <opções do programa...>
+  local exp="$1" rep="$2" np="$3"; shift 3
+  if [ "$np" -eq 1 ]; then mpirun -np 1 ./mpi "$@" $MAPA
+  else mpirun -np "$np" $(mapa_de "$np") ./mpi "$@" $MAPA; fi | tail -1 | sed "s|^|$exp,$rep,|" >> "$OUT"
+}
+
+for rep in $(seq 1 "$REPS"); do
+  # 1) Escalabilidade: base com 1 processo e a melhor configuração (divisão balanceada, k = 2)
+  run escala "$rep" 1
+  for np in 4 8 16 32 64; do run escala "$rep" "$np" -b -k 2; done
+
+  # 2) Divisão das faixas: mesmo número de linhas (igual) contra mesmo número de células com dado
+  for np in 32 64; do run divisao "$rep" "$np" -k 2; done
+
+  # 3) Varreduras por rodada (k), 32 processos, divisão balanceada (0 = até a faixa estabilizar)
+  for k in 0 1 4 8 16; do run k "$rep" 32 -b -k "$k"; done
 done
 
-echo "pronto: $OUT"
+# Carga de cada processo (uma execução de cada divisão, 32 processos), para o gráfico por rank
+for div in "" "-b"; do
+  echo "## divisao=$([ -n "$div" ] && echo balanceada || echo igual)" >> "$CARGA"
+  mpirun -np 32 $(mapa_de 32) ./mpi -k 2 $div -v $MAPA | grep "^#" >> "$CARGA"
+done
+
+echo "pronto: $OUT e $CARGA"

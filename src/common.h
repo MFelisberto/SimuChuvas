@@ -30,6 +30,8 @@ typedef struct {
     const char *out_path;     /* saída opcional: profundidades (float32) */
     const char *anim_path;    /* saída opcional: quadros da animação, um por rodada */
     int max_sweeps;           /* máximo de varreduras por rodada na Fase 1 (0 = até estabilizar) */
+    int balance;              /* 1 = faixas com o mesmo número de células com dado (-b) */
+    int verbose;              /* 1 = imprime a carga de cada processo (-v) */
     float level;              /* nível d'água imposto na borda do mapa (-inf = nenhum) */
     float eps;                /* desnível mínimo de escoamento */
 } Params;
@@ -84,6 +86,6 @@ void print_header(void);
 void print_result(const char *version, int np, const Params *p,
                   long rounds, long rows_visited,
                   double t_total, double t_local, double t_check, double t_exch,
-                  const Stats *s);
+                  double desbal, const Stats *s);
 
 #endif
