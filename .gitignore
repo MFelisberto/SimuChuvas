@@ -1,0 +1,11 @@
+# executável e arquivos gerados
+mpi
+*.o
+dados/rs.dem
+dados/anadem_rs.tif
+dados/*.dep
+dados/*.anim
+dados/rs30.dem
+__pycache__/
+.DS_Store
+.vscode/
