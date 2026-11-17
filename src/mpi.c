@@ -159,7 +159,7 @@ int main(int argc, char **argv)
     if (rank == 0) {
         all = malloc(sizeof(float) * R * C);
         if (!all) MPI_Abort(MPI_COMM_WORLD, 2);
-        dem_read_all(p.dem_path, all, R, C);
+        dem_load(&p, all);                        /* com -r f, o mapa já vem reduzido */
         divide_faixas(all, R, C, np, p.balance, inicio);
     }
     MPI_Bcast(inicio, np + 1, MPI_LONG, 0, MPI_COMM_WORLD);

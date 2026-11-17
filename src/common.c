@@ -20,6 +20,8 @@ static void usage(const char *prog)
         "  -b        divisão balanceada: faixas com o mesmo número de células com dado\n"
         "            (padrão: faixas com o mesmo número de linhas)\n"
         "  -v        imprime a faixa, o tempo e o trabalho de cada processo\n"
+        "  -r f      reduz o mapa: blocos de f x f células viram uma (carga 1/f^2;\n"
+        "            f pode ser fracionário; usado na escalabilidade fraca)\n"
         "  -k n      no máximo n varreduras por rodada na Fase 1 (0 = até estabilizar;\n"
         "            com -a, o padrão vira 1, para a animação mostrar o passo a passo)\n",
         prog);
@@ -28,11 +30,11 @@ static void usage(const char *prog)
 
 void parse_args(int argc, char **argv, Params *p)
 {
-    p->dem_path = "dados/rs.dem"; p->out_path = NULL; p->anim_path = NULL; p->max_sweeps = -1; p->balance = 0; p->verbose = 0; p->level = -INFINITY; p->eps = 0.0f;
+    p->dem_path = "dados/rs.dem"; p->out_path = NULL; p->anim_path = NULL; p->max_sweeps = -1; p->balance = 0; p->verbose = 0; p->level = -INFINITY; p->eps = 0.0f; p->reduce = 1.0;
     /* Aceita as opções antes ou depois do nome do mapa. (O getopt do macOS para no
      * primeiro argumento que não é opção; aqui ele é guardado e a leitura continua.) */
     while (optind < argc) {
-        int c = getopt(argc, argv, "L:e:o:a:k:bvh");
+        int c = getopt(argc, argv, "L:e:o:a:k:r:bvh");
         if (c == -1) { p->dem_path = argv[optind++]; continue; }
         switch (c) {
         case 'L': p->level = (float)atof(optarg); break;
@@ -42,6 +44,7 @@ void parse_args(int argc, char **argv, Params *p)
         case 'k': p->max_sweeps = atoi(optarg); break;
         case 'b': p->balance = 1; break;
         case 'v': p->verbose = 1; break;
+        case 'r': p->reduce = atof(optarg); break;
         default:  usage(argv[0]);
         }
     }
@@ -51,6 +54,11 @@ void parse_args(int argc, char **argv, Params *p)
                 p->dem_path);
         exit(1);
     }
+    p->src_rows = p->rows; p->src_cols = p->cols;
+    if (p->reduce > 1.0) {
+        p->rows = (long)(p->src_rows / p->reduce);
+        p->cols = (long)(p->src_cols / p->reduce);
+    } else p->reduce = 1.0;
     if (p->rows < 3 || p->cols < 3) usage(argv[0]);
 }
 
@@ -88,6 +96,33 @@ void dem_read_all(const char *path, float *Z, long rows, long cols)
         exit(1);
     }
     fclose(f);
+}
+
+void dem_load(const Params *p, float *Z)
+{
+    if (p->reduce == 1.0) { dem_read_all(p->dem_path, Z, p->rows, p->cols); return; }
+    long R = p->src_rows, C = p->src_cols;
+    float *src = malloc(sizeof(float) * R * C);
+    long *c0 = malloc(sizeof(long) * (p->cols + 1));
+    if (!src || !c0) { fprintf(stderr, "sem memória para reduzir o mapa\n"); exit(2); }
+    dem_read_all(p->dem_path, src, R, C);
+    /* bloco da célula reduzida (i, j): linhas [i*f, (i+1)*f) e colunas [j*f, (j+1)*f) */
+    for (long j = 0; j <= p->cols; j++) c0[j] = (long)(j * p->reduce);
+    for (long i = 0; i < p->rows; i++) {
+        long a = (long)(i * p->reduce), b = (long)((i + 1) * p->reduce);
+        if (b > R) b = R;
+        for (long j = 0; j < p->cols; j++) {
+            long cb = c0[j + 1] > C ? C : c0[j + 1];
+            float m = INFINITY;
+            for (long ii = a; ii < b; ii++)
+                for (long jj = c0[j]; jj < cb; jj++) {
+                    float z = src[ii * C + jj];
+                    if (z > NODATA_Z && z < m) m = z;     /* menor altitude com dado */
+                }
+            Z[i * p->cols + j] = isinf(m) ? NODATA_Z : m; /* bloco todo sem dado = ralo */
+        }
+    }
+    free(src); free(c0);
 }
 
 void write_depth(const char *path, const float *D, long rows, long cols)

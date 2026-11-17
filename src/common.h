@@ -25,7 +25,9 @@
 #define NODATA_Z (-1.0e30f)   /* células sem dado (ex.: oceano) funcionam como ralo */
 
 typedef struct {
-    long rows, cols;          /* dimensões do mapa (lidas do arquivo) */
+    long rows, cols;          /* dimensões do mapa usado (as do arquivo, ou reduzidas com -r) */
+    long src_rows, src_cols;  /* dimensões do mapa no arquivo */
+    double reduce;            /* -r f: junta blocos de f x f células (carga 1/f^2; 1 = mapa inteiro) */
     const char *dem_path;     /* mapa do RS no formato .dem (ver tools/prepare_dem.py) */
     const char *out_path;     /* saída opcional: profundidades (float32) */
     const char *anim_path;    /* saída opcional: quadros da animação, um por rodada */
@@ -42,6 +44,11 @@ void   parse_args(int argc, char **argv, Params *p);
 int  dem_read_header(const char *path, long *rows, long *cols);
 void dem_read_all(const char *path, float *Z, long rows, long cols);
 void write_depth(const char *path, const float *D, long rows, long cols);
+
+/* Lê o mapa para Z (p->rows x p->cols). Com -r f, cada célula de Z é a MENOR altitude
+ * com dado do bloco de f x f células do arquivo (f pode ser fracionário): o mesmo RS
+ * inteiro com células maiores, usado para a escalabilidade fraca. */
+void dem_load(const Params *p, float *Z);
 
 /* Inicializa W para as linhas [r0, r0+nr) da grade global. */
 void init_water(float *W, const float *Z, long r0, long nr, const Params *p);

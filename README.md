@@ -87,6 +87,7 @@ mpirun -np 4 ./mpi dados/rs.dem -o dados/rs.dep   # também grava as profundidad
 | `-k n` | no máximo `n` varreduras por rodada na Fase 1 (`0` = até a faixa estabilizar, o padrão; com `-a`, o padrão vira 1). Na atlantica, `-k 2` foi o melhor |
 | `-b` | divisão **balanceada**: faixas com o mesmo número de células com dado, em vez do mesmo número de linhas |
 | `-v` | imprime a faixa, o tempo da Fase 1 e o trabalho de cada processo (para o gráfico de carga) |
+| `-r f` | reduz o mapa: cada bloco de `f` x `f` células vira uma (a menor altitude do bloco), ou seja, o RS inteiro com `1/f²` das células. `f` pode ser fracionário. Usado na escalabilidade fraca |
 
 ### 4. Gerar as figuras
 
@@ -191,13 +192,15 @@ Se o mapa mudar, rode `make partes` no seu computador para regerar as partes e f
    carga de cada processo para `resultados/carga_<job>.txt`.
 
 O script compila, remonta o mapa, roda cada configuração 3 vezes (mude com `REPS=5 sbatch run_grid.sh`)
-e grava a coluna `experimento`:
+e grava a coluna `experimento`. Para rodar só alguns experimentos: `EXPS="fraca" sbatch run_grid.sh`.
 
 | Experimento | O que mede |
 |---|---|
 | `escala` | 1 processo (base do speedup) e 4, 8, 16, 32 e 64 processos com divisão balanceada e `k = 2` |
 | `divisao` | 32 e 64 processos com divisão **igual** (mesmo número de linhas), para comparar com a balanceada |
 | `k` | 32 processos, divisão balanceada, com `k` = 0 (sem limite), 1, 4, 8 e 16 |
+| `fraca` | escalabilidade fraca (só núcleos físicos): com `p` = 1, 4, 8, 16 e 32, o mapa com `p/32` das células (`-r` com `f = √(32/p)`); para cada carga, o tempo com 1 processo e com `p` processos |
+| `carga` | uma execução de cada divisão com 32 processos e `-v` (vai para `carga_<job>.txt`) |
 
 Distribuição nos 4 nós: com até 32 processos, N/4 por nó, um por núcleo físico (`--map-by ppr:N:node
 --bind-to core`); com 64, 16 por nó, dois por núcleo físico (HT). Ranks consecutivos ficam no mesmo
