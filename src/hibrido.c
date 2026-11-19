@@ -72,14 +72,6 @@ int main(int argc, char **argv)
     unsigned char *dirty = malloc(nr);
     if (!Z || !W || !gtop || !gbot || !dirty) MPI_Abort(MPI_COMM_WORLD, 2);
 
-    /* "primeiro toque" em paralelo: cada thread toca as linhas que deve processar, para as
-     * páginas ficarem na memória do soquete dela (cada nó tem 2 soquetes) */
-    #pragma omp parallel for schedule(static)
-    for (long i = 0; i < nr; i++) {
-        memset(Z + i * C, 0, sizeof(float) * C);
-        memset(W + i * C, 0, sizeof(float) * C);
-    }
-
     int *counts = malloc(sizeof(int) * np), *displs = malloc(sizeof(int) * np);
     for (int r = 0; r < np; r++) {
         displs[r] = (int)inicio[r];
@@ -92,6 +84,21 @@ int main(int argc, char **argv)
     /* ---------- divisão da faixa entre as threads (mesmo critério, -b ou não) ---------- */
     long *sub = malloc(sizeof(long) * (T + 1));
     divide_faixas(Z, nr, C, T, p.balance, sub);
+
+    /* cada thread copia as suas linhas para memória nova: no Linux, a página fica no soquete de
+     * quem escreve nela primeiro, então cada thread passa a ler e escrever memória "local"
+     * (cada nó da atlantica tem 2 soquetes, cada um com o seu controlador de memória) */
+    float *Z2 = malloc(sizeof(float) * nr * C), *W2 = malloc(sizeof(float) * nr * C);
+    if (!Z2 || !W2) MPI_Abort(MPI_COMM_WORLD, 2);
+    #pragma omp parallel
+    {
+        int t = omp_get_thread_num();
+        size_t ini = (size_t)sub[t] * C, tam = sizeof(float) * (size_t)(sub[t + 1] - sub[t]) * C;
+        memcpy(Z2 + ini, Z + ini, tam);
+        memcpy(W2 + ini, W + ini, tam);
+    }
+    free(Z); free(W);
+    Z = Z2; W = W2;
 
     int up   = (rank > 0)      ? rank - 1 : MPI_PROC_NULL;
     int down = (rank < np - 1) ? rank + 1 : MPI_PROC_NULL;

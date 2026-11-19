@@ -207,9 +207,11 @@ e grava a coluna `experimento`. Para rodar só alguns experimentos: `EXPS="fraca
 | `k` | 32 processos, divisão balanceada, com `k` = 0 (sem limite), 1, 4, 8 e 16 |
 | `fraca` | escalabilidade fraca (só núcleos físicos): com `p` = 1, 4, 8, 16 e 32, o mapa com `p/32` das células (`-r` com `f = √(32/p)`); para cada carga, o tempo com 1 processo e com `p` processos |
 | `carga` | uma execução de cada divisão com 32 processos e `-v` (vai para `carga_<job>.txt`) |
-| `hibrido` | híbrida, escalabilidade forte: 4 processos (1 por nó) x 1, 2, 4, 8 e 16 threads (16 = HT) |
+| `hibrido` | híbrida, escalabilidade forte: 4 processos (1 por nó, reservando os 8 núcleos do nó: `--map-by ppr:1:node:PE=8`) x 1, 2, 4, 8 e 16 threads (16 = HT, reservando as 16 threads de hardware) |
 | `hfraca` | híbrida, escalabilidade fraca: 4 processos x 1, 2, 4 e 8 threads, com as mesmas cargas do `fraca` |
 | `hsocket` | híbrida com 1 processo por soquete: 8 processos x 4 threads (32) e x 8 threads (64, HT) |
+| `hlivre` | híbrida com 1 processo por nó sem reservar núcleos (`--bind-to none`), 4 x 4, 8 e 16 threads, para comparar com o modo padrão |
+| `diag` | só imprime no `simuchuvas_<job>.out` a topologia do nó e o núcleo em que cada thread rodou |
 
 Distribuição nos 4 nós: com até 32 processos, N/4 por nó, um por núcleo físico (`--map-by ppr:N:node
 --bind-to core`); com 64, 16 por nó, dois por núcleo físico (HT). Ranks consecutivos ficam no mesmo
@@ -299,7 +301,8 @@ OpenMP**, com o mesmo critério (`-b` ou não). Cada thread guarda a sua cópia 
 então na Fase 1 nenhuma thread lê o que outra está escrevendo. Fase 1: `omp parallel` com redução
 do número de mudanças; Fase 2: `MPI_Allreduce` (só a thread mestre chama MPI, `MPI_THREAD_FUNNELED`);
 Fase 3: a mestre troca as bordas com os processos vizinhos e depois cada thread atualiza as suas
-cópias das linhas vizinhas na memória compartilhada.
+cópias das linhas vizinhas na memória compartilhada. Antes do laço, cada thread copia as suas
+linhas para memória nova, para elas ficarem no soquete da thread (cada nó tem 2 soquetes).
 
 ### O que esperar das medições
 

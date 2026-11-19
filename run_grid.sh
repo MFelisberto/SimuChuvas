@@ -4,7 +4,7 @@
 #   sbatch run_grid.sh                 # grava resultados/resultados_<jobid>.csv
 #   REPS=5 sbatch run_grid.sh          # 5 repetições em vez de 3
 #   EXPS=fraca sbatch run_grid.sh      # só alguns experimentos
-#   experimentos: escala divisao k fraca carga (MPI puro) e hibrido hfraca hsocket (MPI + OpenMP)
+#   experimentos: escala divisao k fraca carga (MPI puro) e diag hibrido hfraca hsocket hlivre (MPI + OpenMP)
 #
 #SBATCH --job-name=simuchuvas
 #SBATCH --partition=LAD_geral
@@ -21,7 +21,7 @@ make -s dados                               # remonta o dados/rs.dem a partir da
 [ -f dados/rs.dem ] || { echo "falta dados/rs.dem"; exit 1; }
 
 REPS=${REPS:-3}                             # repetições de cada configuração
-EXPS=${EXPS:-"escala divisao k fraca carga hibrido hfraca hsocket"}   # experimentos a rodar
+EXPS=${EXPS:-"escala divisao k fraca carga diag hibrido hfraca hsocket hlivre"}   # experimentos a rodar
 tem() { [[ " $EXPS " == *" $1 "* ]]; }
 MAPA=dados/rs.dem
 mkdir -p resultados
@@ -44,23 +44,44 @@ run() {   # run <experimento> <rep> <np> <opções do programa...>
   else mpirun -np "$np" $(mapa_de "$np") ./mpi "$@" $MAPA; fi | tail -1 | sed "s|^|$exp,$rep,|" >> "$OUT"
 }
 
-# Versão híbrida: np processos MPI x T threads OpenMP (OMP_NUM_THREADS).
-#   por nó (padrão): 1 processo por nó, que pode usar o nó inteiro (--bind-to none), e as threads
-#     se prendem a núcleos físicos (OMP_PLACES=cores) espalhadas pelos 2 soquetes; com 16
-#     threads, uma por thread de hardware (OMP_PLACES=threads, HT).
-#   por soquete: 2 processos por nó, um em cada soquete, com as threads dentro do seu soquete.
-runh() {  # runh <experimento> <rep> <np> <threads> <opções do programa...>
-  local exp="$1" rep="$2" np="$3" T="$4"; shift 4
-  local places=cores; [ "$T" -gt 8 ] && places=threads
-  local map="--map-by ppr:1:node --bind-to none" bind=spread
-  if [ "$np" -eq 8 ]; then
-    map="--map-by ppr:1:socket --bind-to socket"; bind=close
-    [ "$T" -gt 4 ] && places=threads
-  fi
+# Versão híbrida: np processos MPI x T threads OpenMP (OMP_NUM_THREADS). Modos de distribuição:
+#   no      (padrão) 1 processo por nó, que RESERVA o nó inteiro: 8 núcleos físicos (pe=8), ou as
+#           16 threads de hardware com HT (pe=16); as threads se espalham por elas (spread)
+#   soquete 1 processo por soquete (2 por nó), cada um com os 4 núcleos (ou 8 threads, HT) do
+#           seu soquete
+#   livre   1 processo por nó sem reserva (--bind-to none), como no job 45913, para comparar
+runh() {  # runh <experimento> <rep> <modo> <np> <threads> <opções do programa...>
+  local exp="$1" rep="$2" modo="$3" np="$4" T="$5"; shift 5
+  local pe map places=cores bind=spread
+  case "$modo" in
+    no)      pe=8; [ "$T" -gt 8 ] && { pe=16; places=threads; }
+             map="--map-by ppr:1:node:PE=$pe --bind-to core" ;;
+    soquete) pe=4; bind=close; [ "$T" -gt 4 ] && { pe=8; places=threads; }
+             map="--map-by ppr:1:socket:PE=$pe --bind-to core" ;;
+    livre)   [ "$T" -gt 8 ] && places=threads
+             map="--map-by ppr:1:node --bind-to none" ;;
+  esac
+  [ "$places" = threads ] && map="$map --use-hwthread-cpus"
+  [ "$places" = threads ] && map="${map/--bind-to core/--bind-to hwthread}"
+  local extra=""; [ -n "${OMP_DISPLAY_AFFINITY:-}" ] && extra="-x OMP_DISPLAY_AFFINITY -x OMP_AFFINITY_FORMAT"
   OMP_NUM_THREADS=$T OMP_PLACES=$places OMP_PROC_BIND=$bind \
-    mpirun -np "$np" $map -x OMP_NUM_THREADS -x OMP_PLACES -x OMP_PROC_BIND ./hibrido "$@" $MAPA \
+    mpirun -np "$np" $map -x OMP_NUM_THREADS -x OMP_PLACES -x OMP_PROC_BIND $extra ./hibrido "$@" $MAPA \
     | tail -1 | sed "s|^|$exp,$rep,|" >> "$OUT"
 }
+
+# Diagnóstico (vai para o simuchuvas_<job>.out): topologia do nó e onde cada thread rodou
+if tem diag; then
+  echo "===== topologia do nó ====="
+  lscpu | grep -iE "^(cpu\(s\)|thread|core|socket|numa)"
+  command -v numactl >/dev/null && numactl -H | head -6
+  for cfg in "no 4 8" "no 4 16" "soquete 8 4" "livre 4 8"; do
+    set -- $cfg
+    echo "===== afinidade: modo $1, $2 processos x $3 threads ====="
+    OMP_DISPLAY_AFFINITY=true OMP_AFFINITY_FORMAT="host %H thread %n cpus %A" \
+      runh diag 0 "$1" "$2" "$3" -b -k 2 -r 4 2>&1 | grep -E "^host|rror|not" | sort -V | head -70
+    tail -1 "$OUT"
+  done
+fi
 
 for rep in $(seq 1 "$REPS"); do
   # 1) Escalabilidade forte: base com 1 processo e a melhor configuração (divisão balanceada, k = 2)
@@ -88,19 +109,22 @@ for rep in $(seq 1 "$REPS"); do
 
   # 5) Híbrida, escalabilidade forte: 4 processos (1 por nó) x 1, 2, 4, 8 e 16 threads
   #    (= 4 a 64 trabalhadores; 16 threads = HT), mapa inteiro, balanceada, k = 2
-  if tem hibrido; then for T in 1 2 4 8 16; do runh hibrido "$rep" 4 "$T" -b -k 2; done; fi
+  if tem hibrido; then for T in 1 2 4 8 16; do runh hibrido "$rep" no 4 "$T" -b -k 2; done; fi
 
   # 6) Híbrida, escalabilidade fraca: p = 4 x T trabalhadores com a carga p/32 (mesmas cargas
   #    do experimento fraca, que dá o tempo sequencial de cada carga)
   if tem hfraca; then
     for T in 1 2 4 8; do
       f=$(awk -v p="$(( 4 * T ))" 'BEGIN { printf "%.6f", sqrt(32 / p) }')
-      runh hfraca "$rep" 4 "$T" -b -k 2 -r "$f"
+      runh hfraca "$rep" no 4 "$T" -b -k 2 -r "$f"
     done
   fi
 
   # 7) Híbrida com 1 processo por soquete: 8 processos x 4 threads (32) e x 8 threads (64, HT)
-  if tem hsocket; then for T in 4 8; do runh hsocket "$rep" 8 "$T" -b -k 2; done; fi
+  if tem hsocket; then for T in 4 8; do runh hsocket "$rep" soquete 8 "$T" -b -k 2; done; fi
+
+  # 8) Híbrida sem reserva de núcleos (como no job 45913), para comparar com o modo "no"
+  if tem hlivre; then for T in 4 8 16; do runh hlivre "$rep" livre 4 "$T" -b -k 2; done; fi
 done
 
 # Carga de cada processo (uma execução de cada divisão, 32 processos), para o gráfico por rank
