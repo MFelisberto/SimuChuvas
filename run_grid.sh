@@ -3,7 +3,8 @@
 #
 #   sbatch run_grid.sh                 # grava resultados/resultados_<jobid>.csv
 #   REPS=5 sbatch run_grid.sh          # 5 repetições em vez de 3
-#   EXPS=fraca sbatch run_grid.sh      # só alguns experimentos (escala divisao k fraca carga)
+#   EXPS=fraca sbatch run_grid.sh      # só alguns experimentos
+#   experimentos: escala divisao k fraca carga (MPI puro) e hibrido hfraca hsocket (MPI + OpenMP)
 #
 #SBATCH --job-name=simuchuvas
 #SBATCH --partition=LAD_geral
@@ -15,12 +16,12 @@
 
 set -u
 cd "$SLURM_SUBMIT_DIR"
-make -s mpi
+make -s mpi hibrido
 make -s dados                               # remonta o dados/rs.dem a partir das partes do repositório
 [ -f dados/rs.dem ] || { echo "falta dados/rs.dem"; exit 1; }
 
 REPS=${REPS:-3}                             # repetições de cada configuração
-EXPS=${EXPS:-"escala divisao k fraca carga"}   # experimentos a rodar
+EXPS=${EXPS:-"escala divisao k fraca carga hibrido hfraca hsocket"}   # experimentos a rodar
 tem() { [[ " $EXPS " == *" $1 "* ]]; }
 MAPA=dados/rs.dem
 mkdir -p resultados
@@ -35,12 +36,30 @@ mapa_de() {
   else echo "--map-by ppr:16:node --bind-to hwthread --use-hwthread-cpus"; fi
 }
 
-echo "experimento,rep,versao,np,k,divisao,linhas,colunas,rodadas,trabalho,t_total,t_local,t_verif,t_troca,desbal,checksum,inundadas,volume,prof_max" > "$OUT"
+echo "experimento,rep,versao,np,threads,k,divisao,linhas,colunas,rodadas,trabalho,t_total,t_local,t_verif,t_troca,desbal,checksum,inundadas,volume,prof_max" > "$OUT"
 
 run() {   # run <experimento> <rep> <np> <opções do programa...>
   local exp="$1" rep="$2" np="$3"; shift 3
   if [ "$np" -eq 1 ]; then mpirun -np 1 ./mpi "$@" $MAPA
   else mpirun -np "$np" $(mapa_de "$np") ./mpi "$@" $MAPA; fi | tail -1 | sed "s|^|$exp,$rep,|" >> "$OUT"
+}
+
+# Versão híbrida: np processos MPI x T threads OpenMP (OMP_NUM_THREADS).
+#   por nó (padrão): 1 processo por nó, que pode usar o nó inteiro (--bind-to none), e as threads
+#     se prendem a núcleos físicos (OMP_PLACES=cores) espalhadas pelos 2 soquetes; com 16
+#     threads, uma por thread de hardware (OMP_PLACES=threads, HT).
+#   por soquete: 2 processos por nó, um em cada soquete, com as threads dentro do seu soquete.
+runh() {  # runh <experimento> <rep> <np> <threads> <opções do programa...>
+  local exp="$1" rep="$2" np="$3" T="$4"; shift 4
+  local places=cores; [ "$T" -gt 8 ] && places=threads
+  local map="--map-by ppr:1:node --bind-to none" bind=spread
+  if [ "$np" -eq 8 ]; then
+    map="--map-by ppr:1:socket --bind-to socket"; bind=close
+    [ "$T" -gt 4 ] && places=threads
+  fi
+  OMP_NUM_THREADS=$T OMP_PLACES=$places OMP_PROC_BIND=$bind \
+    mpirun -np "$np" $map -x OMP_NUM_THREADS -x OMP_PLACES -x OMP_PROC_BIND ./hibrido "$@" $MAPA \
+    | tail -1 | sed "s|^|$exp,$rep,|" >> "$OUT"
 }
 
 for rep in $(seq 1 "$REPS"); do
@@ -66,6 +85,22 @@ for rep in $(seq 1 "$REPS"); do
       [ "$np" -gt 1 ] && run fraca "$rep" "$np" -b -k 2 -r "$f"
     done
   fi
+
+  # 5) Híbrida, escalabilidade forte: 4 processos (1 por nó) x 1, 2, 4, 8 e 16 threads
+  #    (= 4 a 64 trabalhadores; 16 threads = HT), mapa inteiro, balanceada, k = 2
+  if tem hibrido; then for T in 1 2 4 8 16; do runh hibrido "$rep" 4 "$T" -b -k 2; done; fi
+
+  # 6) Híbrida, escalabilidade fraca: p = 4 x T trabalhadores com a carga p/32 (mesmas cargas
+  #    do experimento fraca, que dá o tempo sequencial de cada carga)
+  if tem hfraca; then
+    for T in 1 2 4 8; do
+      f=$(awk -v p="$(( 4 * T ))" 'BEGIN { printf "%.6f", sqrt(32 / p) }')
+      runh hfraca "$rep" 4 "$T" -b -k 2 -r "$f"
+    done
+  fi
+
+  # 7) Híbrida com 1 processo por soquete: 8 processos x 4 threads (32) e x 8 threads (64, HT)
+  if tem hsocket; then for T in 4 8; do runh hsocket "$rep" 8 "$T" -b -k 2; done; fi
 done
 
 # Carga de cada processo (uma execução de cada divisão, 32 processos), para o gráfico por rank

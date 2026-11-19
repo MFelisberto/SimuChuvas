@@ -139,6 +139,42 @@ void write_depth(const char *path, const float *D, long rows, long cols)
 /* Algoritmo                                                           */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Divide as R linhas do mapa em np faixas consecutivas.
+ *   igual (padrão): o mesmo número de linhas em cada faixa;
+ *   balanceada (-b): o mesmo número de CÉLULAS COM DADO em cada faixa. Linhas com muito
+ *   oceano ou país vizinho ("sem dado", que quase não custam nada) ficam em faixas mais
+ *   altas, e linhas só com terra em faixas mais baixas.
+ * Cada linha pesa (células com dado + 1), para linhas vazias também serem distribuídas.
+ */
+void divide_faixas(const float *Z, long R, long C, int np, int balance, long *inicio)
+{
+    inicio[0] = 0; inicio[np] = R;
+    if (!balance) {
+        for (int r = 1; r < np; r++) inicio[r] = (long)r * R / np;
+        return;
+    }
+    double total = 0;
+    double *peso = malloc(sizeof(double) * R);
+    for (long i = 0; i < R; i++) {
+        long n = 0;
+        for (long j = 0; j < C; j++) n += (Z[i * C + j] > NODATA_Z);
+        peso[i] = (double)n + 1.0;
+        total += peso[i];
+    }
+    double acum = 0;
+    long i = 0;
+    for (int r = 1; r < np; r++) {
+        double alvo = total * r / np;              /* a faixa r começa quando o acumulado passa daqui */
+        while (i < R && acum + peso[i] <= alvo) acum += peso[i++];
+        long min_i = inicio[r - 1] + 1;            /* toda faixa tem pelo menos 1 linha */
+        long max_i = R - (np - r);                 /* e sobra pelo menos 1 linha para cada faixa seguinte */
+        inicio[r] = i < min_i ? min_i : (i > max_i ? max_i : i);
+        while (i < inicio[r]) acum += peso[i++];
+    }
+    free(peso);
+}
+
 void init_water(float *W, const float *Z, long r0, long nr, const Params *p)
 {
     for (long i = 0; i < nr; i++) {
@@ -243,17 +279,17 @@ void stats_rows(const float *W, const float *Z, long r0, long nr, long cols, Sta
 
 void print_header(void)
 {
-    printf("versao,np,k,divisao,linhas,colunas,rodadas,trabalho,"
+    printf("versao,np,threads,k,divisao,linhas,colunas,rodadas,trabalho,"
            "t_total,t_local,t_verif,t_troca,desbal,checksum,inundadas,volume,prof_max\n");
 }
 
-void print_result(const char *version, int np, const Params *p,
+void print_result(const char *version, int np, int threads, const Params *p,
                   long rounds, long rows_visited,
                   double t_total, double t_local, double t_check, double t_exch,
                   double desbal, const Stats *s)
 {
-    printf("%s,%d,%d,%s,%ld,%ld,%ld,%.2f,%.4f,%.4f,%.4f,%.4f,%.2f,%016llx,%ld,%.6e,%.3f\n",
-           version, np, p->max_sweeps, p->balance ? "balanceada" : "igual",
+    printf("%s,%d,%d,%d,%s,%ld,%ld,%ld,%.2f,%.4f,%.4f,%.4f,%.4f,%.2f,%016llx,%ld,%.6e,%.3f\n",
+           version, np, threads, p->max_sweeps, p->balance ? "balanceada" : "igual",
            p->rows, p->cols, rounds, (double)rows_visited / p->rows,
            t_total, t_local, t_check, t_exch, desbal,
            (unsigned long long)s->checksum, s->flooded, s->volume, s->max_depth);

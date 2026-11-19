@@ -1,24 +1,33 @@
 \documentclass[9pt,a4paper]{extarticle}
 \usepackage[a4paper,margin=1.4cm,top=1.2cm,bottom=1.3cm]{geometry}
-\usepackage{fontspec}
-\setmainfont{TeX Gyre Termes}
-\setmonofont[Scale=0.85]{DejaVu Sans Mono}
-\usepackage{unicode-math}
-\setmathfont{Latin Modern Math}
+% Fonte: Latin Modern, a mesma do T1 e do T2. Compila com pdfLaTeX (padrão do Overleaf) ou XeLaTeX.
+\usepackage{iftex}
+\ifXeTeX
+  \usepackage{fontspec}      % sem \setmainfont: Latin Modern é a padrão
+  \usepackage{amsmath}
+\else
+  \usepackage[T1]{fontenc}
+  \usepackage[utf8]{inputenc}
+  \usepackage{lmodern}
+  \usepackage{amsmath}
+\fi
 \AtBeginDocument{\renewcommand{\figurename}{Figura}\renewcommand{\tablename}{Tabela}}
 \usepackage{multicol,graphicx,booktabs,listings,xcolor,titlesec,enumitem,caption,float}
 \usepackage[hidelinks]{hyperref}
 \setlength{\columnsep}{0.55cm}
-\titleformat{\section}{\normalfont\bfseries\normalsize}{\thesection}{0.5em}{}
-\titleformat{\subsection}{\normalfont\bfseries\itshape\small}{\thesubsection}{0.5em}{}
+\titleformat{\section}{\normalfont\bfseries\normalsize}{\thesection.}{0.4em}{}
+\titleformat{\subsection}[runin]{\normalfont\bfseries}{\thesubsection}{0.4em}{}[.]
 \titlespacing*{\section}{0pt}{5pt}{2pt}
-\titlespacing*{\subsection}{0pt}{3pt}{1pt}
+\titlespacing*{\subsection}{0pt}{3pt}{0.5em}
 \setlength{\parindent}{0pt}\setlength{\parskip}{2.5pt}
 \setlist{nosep,leftmargin=1.1em}
 \captionsetup{font=small,labelfont=bf,skip=2pt}
 \pagestyle{plain}
 \newcommand{\tl}{t_{\mathrm{local}}}
-\lstset{basicstyle=\ttfamily\scriptsize,columns=fullflexible,keepspaces=true,breaklines=true,
+\lstset{basicstyle=\ttfamily\scriptsize,
+  literate={á}{{\'a}}1 {é}{{\'e}}1 {í}{{\'i}}1 {ó}{{\'o}}1 {ú}{{\'u}}1 {ã}{{\~a}}1 {õ}{{\~o}}1
+           {ç}{{\c{c}}}1 {ê}{{\^e}}1 {É}{{\'E}}1 {—}{{--}}1,
+columns=fullflexible,keepspaces=true,breaklines=true,
   numbers=left,numberstyle=\tiny\color{gray},numbersep=4pt,frame=lines,framerule=0.3pt,
   commentstyle=\color[HTML]{5b6b7a}\itshape,keywordstyle=\color[HTML]{1c5cab}\bfseries,
   stringstyle=\color[HTML]{a3461c},showstringspaces=false,tabsize=4,aboveskip=4pt,belowskip=4pt}
@@ -34,40 +43,38 @@
 \section{Problema}
 Onde a chuva fica presa no RS? Usamos o relevo do estado inteiro (ANADEM, da ANA e do IPH/UFRGS: modelo de \emph{terreno} de 30\,m, sem o viés da vegetação), reamostrado para células de 60\,m: \textbf{12\,412 linhas $\times$ 14\,806 colunas = 184 milhões de células} (700\,MB). Para cada célula $c$ com altitude $Z(c)$ calculamos o nível $W(c)$ em que a água fica parada, pelo preenchimento de depressões de Planchon e Darboux. $W$ começa em $+\infty$ no interior e em $Z$ na borda do mapa e onde não há dado (mar, lagoas, países vizinhos), que funcionam como ralo. Depois, repete-se até nada mudar:
 \[ W(c) \leftarrow \min\bigl(W(c),\ \max(Z(c),\ \min_{n} W(n))\bigr) \]
-O termo $\min_n W(n)$ é o nível do vizinho $n$ mais baixo (8 vizinhos): a água de $c$ não precisa ficar acima dele, porque escoaria por ali. O $\max$ com $Z(c)$ garante que o nível nunca fica abaixo do chão, e o $\min$ externo, que o nível só desce. A profundidade é $W-Z$. Esse ponto fixo é único, então o resultado não depende da ordem de cálculo: \textbf{as 39 execuções deram o mesmo checksum} (\texttt{bb09d286e0336ace}): 7,34\,M células alagadas, até 210\,m de profundidade (cânion do Itaimbezinho). A opção \texttt{-L} impõe um nível nas bordas (ex.: 5,35\,m, o pico do Guaíba em maio de 2024) para as figuras de Porto Alegre do repositório.
+Nela, $\min_n W(n)$ é o nível do vizinho mais baixo (8 vizinhos): a água de $c$ não fica acima dele, porque escoaria por ali; o $\max$ com $Z(c)$ impede o nível de ficar abaixo do chão, e o $\min$ externo faz o nível só descer. A profundidade é $W-Z$ (a regra está em \texttt{common.c}, l.~186--190). Esse ponto fixo é único, então o resultado não depende da ordem de cálculo: \textbf{as 39 execuções deram o mesmo checksum} (\texttt{bb09d286e0336ace}): 7,34\,M células alagadas, até 210\,m de profundidade (cânion do Itaimbezinho).
 
 \section{Modelo de fases paralelas}
-O mapa é dividido em \textbf{faixas horizontais} de linhas, uma por processo (P0 = norte, P$_{p-1}$ = Chuí), cada uma com duas linhas fantasma (a borda dos vizinhos). O processo 0 lê o arquivo, calcula onde cada faixa começa (\texttt{MPI\_Bcast}) e distribui as faixas (\texttt{MPI\_Scatterv} com um tipo ``linha''). Depois, todos repetem:
+O mapa é dividido em \textbf{faixas horizontais} de linhas, uma por processo (P0 = norte, P$_{p-1}$ = Chuí), cada uma com duas linhas fantasma (a borda dos vizinhos). O processo 0 lê o arquivo, calcula onde cada faixa começa (\texttt{divide\_faixas}, \texttt{mpi.c} l.~107--133; \texttt{MPI\_Bcast}, l.~165) e distribui as faixas (\texttt{MPI\_Scatterv} com um tipo ``linha'', l.~152 e 183). Depois, todos repetem (as linhas citadas a seguir são do \texttt{mpi.c}):
 \begin{enumerate}
-\item \textbf{Processamento local:} até $k$ varreduras Gauss-Seidel na faixa, alternando 4 direções, só nas linhas marcadas como ``sujas''.
-\item \textbf{Verificação distribuída:} \texttt{MPI\_Allreduce} (OU lógico) de ``minha faixa mudou?''. Se ninguém mudou, terminou.
-\item \textbf{Troca com os vizinhos:} \texttt{MPI\_Sendrecv} da primeira e da última linha; se a fantasma recebida mudou, a linha de borda volta a ficar suja.
+\item \textbf{Processamento local} (l.~217--223): até $k$ varreduras Gauss-Seidel na faixa, alternando 4 direções, só nas linhas marcadas como ``sujas'' (\texttt{relax\_block} e \texttt{sweep}, \texttt{common.c} l.~158--223).
+\item \textbf{Verificação distribuída} (l.~225--230): \texttt{MPI\_Allreduce} (OU lógico) de ``minha faixa mudou?''. Se ninguém mudou, terminou.
+\item \textbf{Troca com os vizinhos} (l.~232--243): \texttt{MPI\_Sendrecv} da primeira e da última linha; se a fantasma recebida mudou, a linha de borda volta a ficar suja.
 \end{enumerate}
 O $k$ controla a granularidade da fase local (o análogo do \emph{chunk} do T1 e do $U$ do T2). Há duas divisões: \textbf{igual} (mesmo número de linhas) e \textbf{balanceada} (\texttt{-b}: mesmo número de células com dado, já que mar e Uruguai quase não custam).
 
 \section{Metodologia}
-Cluster \textbf{atlantica}, 4 nós exclusivos (Slurm), cada um com 2 soquetes $\times$ 4 núcleos e 2 \emph{threads} por núcleo (8 físicos, 16 lógicos), OpenMPI 4.1.1, \texttt{mpicc -O3}. Até 32 processos: $p/4$ por nó, um por núcleo físico (\texttt{--bind-to core}); com 64: 16 por nó, com HT (\texttt{--bind-to hwthread}). Ranks consecutivos ficam no mesmo nó, então só 3 fronteiras passam pela rede. A leitura do arquivo fica fora da medição. Cada configuração rodou 3 vezes e usamos o menor tempo (variação $<0{,}5\%$). A base é \texttt{mpirun -np 1} ($T_1 = 18{,}56$\,s, sem comunicação). Métricas: $S=T_1/T_p$ e $E=S/p$; \textbf{trabalho} = linhas visitadas $\div$ linhas do mapa (o sequencial varre o mapa o equivalente a 27,7 vezes), e eficiência de trabalho $=27{,}7/\text{trabalho}$; \textbf{desbal} = ($\tl$ máximo $-$ média)/média, como no T1/T2; $t_{\mathrm{verif}}$ inclui a espera pelo processo mais lento.
+Cluster \textbf{atlantica}, 4 nós exclusivos (Slurm), cada um com 2 soquetes $\times$ 4 núcleos e 2 \emph{threads} por núcleo (8 físicos, 16 lógicos), OpenMPI 4.1.1, \texttt{mpicc -O3}. Até 32 processos: $p/4$ por nó, um por núcleo físico (\texttt{--bind-to core}); com 64: 16 por nó, com HT (\texttt{--bind-to hwthread}). Ranks consecutivos ficam no mesmo nó (só 3 fronteiras passam pela rede). A leitura do arquivo fica fora da medição. A única barreira (l.~201), logo após o \texttt{Scatterv}, só alinha o início do relógio (sem ela, quem recebe a faixa antes contaria como seu o tempo esperando os outros); dentro do laço, quem sincroniza é o \texttt{Allreduce}. Cada configuração rodou 3 vezes e usamos o menor tempo (variação $<0{,}5\%$). A base é \texttt{mpirun -np 1} ($T_1 = 18{,}56$\,s, sem comunicação). Métricas: $S=T_1/T_p$ e $E=S/p$; \textbf{trabalho} = linhas visitadas $\div$ linhas do mapa (27,7 no sequencial); \textbf{desbal} = ($\tl$ máximo $-$ média)/média, como no T1/T2; $t_{\mathrm{verif}}$ inclui a espera pelo processo mais lento. \textbf{Escalabilidade fraca} (só núcleos físicos): com $p$ processos, o mesmo RS com $p/32$ das células (opção \texttt{-r}, \texttt{common.c} l.~101--126: células $\sqrt{32/p}$ vezes maiores, com a menor altitude de cada bloco); para cada carga medimos o tempo com 1 e com $p$ processos.
 
 \section{Análise}
 \subsection{Escalabilidade}
-Com divisão balanceada e $k=2$, o speedup foi 2,9 / 4,5 / 6,3 / \textbf{10,5} com 4 / 8 / 16 / 32 processos (Tab.~1, Fig.~1). A comunicação não é o problema: a troca de bordas custa 0,06\,s (3\%). Com 32 processos, o tempo ideal seria 0,58\,s; chegamos a 1,77\,s por três motivos (Fig.~2):
-\begin{itemize}
-\item \textbf{Trabalho extra} ($\times1{,}35$): cada faixa começa sem conhecer a borda dos vizinhos e forma ``lagos falsos'' encostados nelas, que precisam ser esvaziados depois. Mais faixas, mais fronteiras.
-\item \textbf{Custo por linha} (+13\%): 8 processos por nó dividem a banda de memória (54\,$\mu$s por linha com 1 processo, 61\,$\mu$s com 32).
-\item \textbf{Espera} (0,82\,s, quase metade do tempo): a cada rodada, todos esperam o mais lento no \texttt{Allreduce}.
-\end{itemize}
+Com divisão balanceada e $k=2$, o speedup foi 2,9 / 4,5 / 6,3 / \textbf{10,5} com 4 / 8 / 16 / 32 processos (Tab.~1, Fig.~1). A comunicação não é o problema: a troca de bordas custa 0,06\,s (3\%). Com 32 processos, o ideal seria 0,58\,s; chegamos a 1,77\,s por três motivos (Fig.~2). (i)~\textbf{Trabalho extra} ($\times1{,}35$): cada faixa começa sem conhecer a borda dos vizinhos e forma ``lagos falsos'' encostados nelas, que depois precisam ser esvaziados; mais faixas, mais fronteiras. (ii)~\textbf{Custo por linha} (+13\%): 8 processos por nó dividem a banda de memória (54\,$\mu$s por linha com 1 processo, 61\,$\mu$s com 32). (iii)~\textbf{Espera} (0,82\,s, quase metade do tempo): a cada rodada, todos esperam o mais lento no \texttt{Allreduce}.
 
 \subsection{Granularidade da fase local ($k$)}
-Deixar cada faixa estabilizar sozinha ($k=\infty$) foi o pior caso: 5,70\,s com só 17 rodadas, mas trabalho 77 (2,8 vezes o sequencial), porque cada faixa resolve por inteiro um problema errado (os lagos falsos) antes de ouvir os vizinhos. Com $k$ pequeno a informação atravessa as fronteiras logo: $k=2$ foi o melhor (1,77\,s, 42 rodadas). Com $k=1$ as rodadas dobram (83) e a troca dobra (0,11\,s), e o tempo sobe um pouco (Fig.~3, Tab.~3).
+Deixar cada faixa estabilizar sozinha ($k=\infty$) foi o pior caso: 5,70\,s com 17 rodadas, mas trabalho 77 (2,8 vezes o sequencial), pois cada faixa resolve um problema errado (os lagos falsos) antes de ouvir os vizinhos. Com $k$ pequeno a informação atravessa as fronteiras logo: $k=2$ foi o melhor (1,77\,s, 42 rodadas). Com $k=1$ as rodadas dobram (83) e a troca dobra (0,11\,s), e o tempo sobe um pouco (Fig.~3, Tab.~4).
 
 \subsection{Balanceamento}
-Na divisão igual, as faixas do norte (Alto Uruguai e Planalto, relevo recortado e cheio de depressões) levam até 1,58\,s, e as do sul (Campanha, Lagoa dos Patos) 0,37\,s: desbal = 78\%. A divisão balanceada baixou o desbal para 52\% e o maior $\tl$ em 14\%, mas \textbf{o tempo total não mudou} (1,77 contra 1,74\,s; Fig.~4, Tab.~2). Em FP, cada rodada espera o processo mais lento \emph{daquela rodada}, então o tempo é a soma dos máximos de cada rodada, e não o máximo das somas. A carga de cada rodada depende de onde está a frente de escoamento, que muda de faixa a faixa; dividir pela carga total não acompanha isso.
+Na divisão igual, as faixas do norte (Alto Uruguai e Planalto, cheios de depressões) levam até 1,58\,s, e as do sul (Campanha, Lagoa dos Patos) 0,37\,s: desbal = 78\%. A divisão balanceada baixou o desbal para 52\% e o maior $\tl$ em 14\%, mas \textbf{o tempo total não mudou} (1,77 contra 1,74\,s; Fig.~4, Tab.~3). Em FP, cada rodada espera o processo mais lento \emph{daquela rodada}, então o tempo é a soma dos máximos de cada rodada, e não o máximo das somas. A carga de cada rodada segue a frente de escoamento, que muda de faixa; dividir pela carga total não acompanha isso.
+
+\subsection{Escalabilidade fraca}
+Com a carga proporcional a $p$ (Fig.~1, Tab.~2), o tempo paralelo foi de 0,31\,s ($p=1$, 1/32 do mapa) a 1,77\,s ($p=32$, mapa inteiro). Primeiro, o problema cresce mais que a carga: com células menores o caminho até o ralo tem mais células, e até o sequencial precisa de mais varreduras (14,8 contra 27,7), então 32 vezes mais células custam 60 vezes mais tempo sequencial. Segundo, as perdas da Seção 4.1 crescem com $p$ (de 27 a 42 rodadas). Comparando cada carga com o seu próprio sequencial, $E$ foi 66 / 53 / 38 / 33\% com 4 / 8 / 16 / 32 processos, quase a mesma da escalabilidade forte (73 / 57 / 39 / 33\%): a perda depende do número de faixas, e não do tamanho do mapa.
 
 \subsection{Hyper-threading (64 processos)}
 Com HT, o tempo piorou (1,96 contra 1,77\,s). Duas \emph{threads} no mesmo núcleo dividem o núcleo e a memória: o custo por linha quase dobra (61 para 113\,$\mu$s). Além disso, o dobro de faixas dá +24\% de trabalho e 52 rodadas em vez de 42. No T1/T2 o HT ajudou (+47\%), porque o cálculo era limitado pelo processador; aqui o \emph{stencil} é limitado pela memória.
 
 \subsection{Conclusão}
-O modelo FP se encaixa no problema (uma relaxação que converge por rodadas) e chegou a speedup 10,5 com 32 processos, com o mesmo resultado bit a bit em qualquer configuração. O que limita não é o volume de comunicação, e sim a sincronização a cada rodada e o trabalho extra criado pelas fronteiras entre faixas; por isso o melhor ajuste foi no $k$, e não na divisão das faixas.
+O FP se encaixa no problema (uma relaxação que converge por rodadas): speedup 10,5 com 32 processos e o mesmo resultado bit a bit em qualquer configuração. O limite não é a comunicação, e sim a sincronização a cada rodada e o trabalho extra das fronteiras; por isso o melhor ajuste foi no $k$, e não na divisão.
 
 \section{Declaração de uso de IA}
 Usamos o Claude (Anthropic) para discutir a escolha do problema, escrever e revisar partes do código C e dos scripts em Python (preparação do mapa, figuras e animações), montar o script de execução no cluster e redigir este relatório. As execuções na atlantica foram feitas por nós, e revisamos o código e as conclusões.
@@ -77,9 +84,9 @@ Usamos o Claude (Anthropic) para discutir a escolha do problema, escrever e revi
 \section*{Gráficos e tabelas}
 \begin{figure}[H]\centering
 \includegraphics[width=\linewidth]{fig/speedup.pdf}
-\caption{Speedup e eficiência (escalas log$_2$). A linha pontilhada em 32 marca o fim dos núcleos físicos; à direita, HT. Eficiência de trabalho = trabalho do sequencial / trabalho paralelo.}
+\caption{Speedup (linhas, eixo da esquerda) e eficiência (colunas, eixo da direita). Forte: o mapa inteiro com 1 a 64 processos (64 = HT). Fraca (job 45575): a carga cresce com $p$, e o speedup de cada carga usa o tempo sequencial daquela mesma carga (Tab.~2).}
 \end{figure}
-\vspace{-6pt}
+\vspace{-10pt}
 \begin{figure}[H]\centering
 \begin{minipage}{0.49\linewidth}\centering
 \includegraphics[width=\linewidth]{fig/tempo.pdf}
@@ -90,14 +97,14 @@ Usamos o Claude (Anthropic) para discutir a escolha do problema, escrever e revi
 \caption{Efeito de $k$ (varreduras por rodada) com 32 processos; $\infty$ = cada faixa estabiliza antes de trocar. Em laranja, o $k$ usado.}
 \end{minipage}
 \end{figure}
-\vspace{-6pt}
+\vspace{-10pt}
 \begin{figure}[H]\centering
 \includegraphics[width=\linewidth]{fig/carga.pdf}
 \caption{Tempo de cálculo ($\tl$) de cada processo, divisão igual e balanceada (32 processos, $k=2$); tracejado = média. Na balanceada as faixas do sul (26--31) ficam com 2 a 3 vezes mais linhas, porque metade delas é mar.}
 \end{figure}
 
 \begin{minipage}[t]{0.56\linewidth}
-\captionof{table}{Escalabilidade (divisão balanceada, $k=2$; melhor de 3).}
+\captionof{table}{Escalabilidade forte (mapa inteiro, divisão balanceada, $k=2$; melhor de 3; job 45565). Uma bateria repetida em outro momento (job 45572) deu o mesmo cálculo, mas troca de bordas 6 vezes mais lenta (provavelmente tráfego na rede): 1,98\,s com 32.}
 \centering\small\setlength{\tabcolsep}{3.5pt}
 \begin{tabular}{rrrrrrrrr}\toprule
 $p$ & $T_p$ (s) & $S$ & $E$ & rodadas & trabalho & $t_{\mathrm{verif}}$ & $t_{\mathrm{troca}}$ & desbal\\\midrule
@@ -107,6 +114,17 @@ $p$ & $T_p$ (s) & $S$ & $E$ & rodadas & trabalho & $t_{\mathrm{verif}}$ & $t_{\m
 16 & 2,943  & 6,31  & 39\%  & 42 & 33,2 & 1,95 & 0,062 & 54\% \\
 32 & \textbf{1,768} & \textbf{10,50} & 33\% & 42 & 37,4 & 1,31 & 0,056 & 52\% \\
 64 (HT) & 1,961 & 9,46 & 15\% & 52 & 46,5 & 1,49 & 0,079 & 47\% \\\bottomrule
+\end{tabular}
+
+\vspace{6pt}
+\captionof{table}{Escalabilidade fraca (só núcleos físicos; balanceada, $k=2$). $T_{\mathrm{seq}}$ = 1 processo e $T_p$ = $p$ processos, na mesma carga; $S=T_{\mathrm{seq}}/T_p$, $E=S/p$.}
+\begin{tabular}{rrrrrrr}\toprule
+$p$ & linhas $\times$ colunas & células & $T_{\mathrm{seq}}$ (s) & $T_p$ (s) & $S$ & $E$\\\midrule
+1  & 2\,194 $\times$ 2\,617   & 5,7\,M  & 0,308  & 0,308 & 1,00  & 100\% \\
+4  & 4\,388 $\times$ 5\,234   & 23,0\,M & 1,598  & 0,607 & 2,63  & 66\% \\
+8  & 6\,206 $\times$ 7\,403   & 45,9\,M & 3,629  & 0,862 & 4,21  & 53\% \\
+16 & 8\,776 $\times$ 10\,469  & 91,9\,M & 8,393  & 1,392 & 6,03  & 38\% \\
+32 & 12\,412 $\times$ 14\,806 & 183,8\,M & 18,577 & 1,766 & 10,52 & 33\% \\\bottomrule
 \end{tabular}
 \end{minipage}\hfill
 \begin{minipage}[t]{0.42\linewidth}

@@ -50,6 +50,11 @@ void write_depth(const char *path, const float *D, long rows, long cols);
  * inteiro com células maiores, usado para a escalabilidade fraca. */
 void dem_load(const Params *p, float *Z);
 
+/* Divide R linhas (de Z, R x C) em n faixas consecutivas: inicio[r] = primeira linha da
+ * faixa r, inicio[n] = R. balance = 0: mesmo número de linhas; 1: mesmo número de células
+ * com dado. Usada entre processos (mpi.c, hibrido.c) e entre threads (hibrido.c). */
+void divide_faixas(const float *Z, long R, long C, int n, int balance, long *inicio);
+
 /* Inicializa W para as linhas [r0, r0+nr) da grade global. */
 void init_water(float *W, const float *Z, long r0, long nr, const Params *p);
 
@@ -90,7 +95,7 @@ void stats_rows(const float *W, const float *Z, long r0, long nr, long cols, Sta
 /* Imprime a linha de resultado em CSV. "trabalho" = linhas processadas / linhas da
  * grade, ou seja, o trabalho total medido em varreduras completas equivalentes. */
 void print_header(void);
-void print_result(const char *version, int np, const Params *p,
+void print_result(const char *version, int np, int threads, const Params *p,
                   long rounds, long rows_visited,
                   double t_total, double t_local, double t_check, double t_exch,
                   double desbal, const Stats *s);

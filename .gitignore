@@ -1,5 +1,7 @@
 # executável e arquivos gerados
 mpi
+hibrido
+hibrido
 *.o
 dados/rs.dem
 dados/anadem_rs.tif

@@ -19,7 +19,8 @@ alagamento/
 ├── src/             o cálculo, em C
 │   ├── common.h     declarações e explicação da regra de atualização
 │   ├── common.c     leitura do mapa, varredura, checksum, saída CSV
-│   └── mpi.c        o programa: distribuição do mapa e laço de fases com MPI
+│   ├── mpi.c        versão MPI puro: distribuição do mapa e laço de fases com MPI
+│   └── hibrido.c    versão híbrida MPI + OpenMP: faixas entre processos, sub-faixas entre threads
 ├── tools/           ferramentas em Python
 │   ├── prepare_dem.py      baixa o relevo e gera os mapas em dados/
 │   ├── render.py           desenha as figuras (RS inteiro ou só Porto Alegre)
@@ -31,7 +32,7 @@ alagamento/
 ```
 
 Arquivos que aparecem com o uso e podem ser apagados quando quiser:
-- **`mpi`:** o executável, criado pelo `make`;
+- **`mpi`** e **`hibrido`:** os executáveis, criados pelo `make`;
 - **`dados/*.dep`:** profundidades gravadas com `-o`, refeitas em segundos;
 - **`dados/*.anim`:** quadros da animação gravados com `-a`;
 - **`dados/anadem_rs.tif`:** o arquivo original da ANA, baixado pelo `prepare_dem.py`. Sem ele, gerar um mapa novo baixa tudo de novo.
@@ -71,11 +72,16 @@ latitude/longitude e recorta.
 ### 3. Compilar e rodar
 
 ```bash
-make                                              # gera ./mpi
+make                                              # gera ./mpi e ./hibrido (make mpi: só o MPI puro)
 mpirun -np 1 ./mpi                                # 1 processo (usa dados/rs.dem)
 mpirun -np 8 ./mpi dados/rs.dem                   # 8 processos
 mpirun -np 4 ./mpi dados/rs.dem -o dados/rs.dep   # também grava as profundidades
+OMP_NUM_THREADS=4 mpirun -np 2 -x OMP_NUM_THREADS ./hibrido -b -k 2 dados/rs.dem   # híbrida: 2 processos x 4 threads
 ```
+
+O `./hibrido` aceita as mesmas opções, menos `-a` e `-o` (figuras e animação são feitas com o `./mpi`).
+No macOS, o `clang` da Apple não tem OpenMP: para compilar o `hibrido` no Mac, instale a `libomp`
+(`conda install -c conda-forge llvm-openmp`) ou rode só no cluster.
 
 | Opção | Significado |
 |---|---|
@@ -201,6 +207,9 @@ e grava a coluna `experimento`. Para rodar só alguns experimentos: `EXPS="fraca
 | `k` | 32 processos, divisão balanceada, com `k` = 0 (sem limite), 1, 4, 8 e 16 |
 | `fraca` | escalabilidade fraca (só núcleos físicos): com `p` = 1, 4, 8, 16 e 32, o mapa com `p/32` das células (`-r` com `f = √(32/p)`); para cada carga, o tempo com 1 processo e com `p` processos |
 | `carga` | uma execução de cada divisão com 32 processos e `-v` (vai para `carga_<job>.txt`) |
+| `hibrido` | híbrida, escalabilidade forte: 4 processos (1 por nó) x 1, 2, 4, 8 e 16 threads (16 = HT) |
+| `hfraca` | híbrida, escalabilidade fraca: 4 processos x 1, 2, 4 e 8 threads, com as mesmas cargas do `fraca` |
+| `hsocket` | híbrida com 1 processo por soquete: 8 processos x 4 threads (32) e x 8 threads (64, HT) |
 
 Distribuição nos 4 nós: com até 32 processos, N/4 por nó, um por núcleo físico (`--map-by ppr:N:node
 --bind-to core`); com 64, 16 por nó, dois por núcleo físico (HT). Ranks consecutivos ficam no mesmo
@@ -284,6 +293,14 @@ Depois, todos repetem até terminar:
 | 2. Verificação distribuída | `MPI_Allreduce` (OU lógico) de "minha faixa mudou?"; se ninguém mudou, terminou | `src/mpi.c` |
 | 3. Troca com os vizinhos | `MPI_Sendrecv` das linhas de borda com a faixa de cima e a de baixo | `src/mpi.c` |
 
+**Versão híbrida (`src/hibrido.c`).** O mesmo modelo em dois níveis: entre processos (um por nó)
+continua igual; dentro do processo, a faixa é dividida de novo em **sub-faixas, uma por thread
+OpenMP**, com o mesmo critério (`-b` ou não). Cada thread guarda a sua cópia das linhas vizinhas,
+então na Fase 1 nenhuma thread lê o que outra está escrevendo. Fase 1: `omp parallel` com redução
+do número de mudanças; Fase 2: `MPI_Allreduce` (só a thread mestre chama MPI, `MPI_THREAD_FUNNELED`);
+Fase 3: a mestre troca as bordas com os processos vizinhos e depois cada thread atualiza as suas
+cópias das linhas vizinhas na memória compartilhada.
+
 ### O que esperar das medições
 
 Mais processos dividem o cálculo em mais partes, mas também criam mais fronteiras. A informação
@@ -322,12 +339,16 @@ Usem a média das repetições de cada configuração.
 ## Saída (uma linha CSV por execução)
 
 ```
-versao,np,k,divisao,linhas,colunas,rodadas,trabalho,t_total,t_local,t_verif,t_troca,desbal,checksum,inundadas,volume,prof_max
+versao,np,threads,k,divisao,linhas,colunas,rodadas,trabalho,t_total,t_local,t_verif,t_troca,desbal,checksum,inundadas,volume,prof_max
 ```
+
+(Os CSVs dos jobs 45565, 45572 e 45575 são de antes da coluna `threads`.)
 
 | Coluna | Significado |
 |---|---|
-| `np` | número de processos |
+| `versao` | `mpi` ou `hibrido` |
+| `np` | número de processos MPI |
+| `threads` | threads OpenMP por processo (`1` no `mpi`) |
 | `k` | máximo de varreduras por rodada (`0` = sem limite) |
 | `divisao` | `igual` (mesmo número de linhas por faixa) ou `balanceada` (mesmo número de células com dado) |
 | `linhas`, `colunas` | tamanho do mapa |
@@ -337,7 +358,7 @@ versao,np,k,divisao,linhas,colunas,rodadas,trabalho,t_total,t_local,t_verif,t_tr
 | `t_local` | tempo na fase 1 |
 | `t_verif` | tempo na fase 2; **inclui a espera pelas faixas mais lentas** (desbalanceamento: faixas com mais várzea e lagoa dão mais trabalho) |
 | `t_troca` | tempo na fase 3 |
-| `desbal` | desbalanceamento, a mesma métrica do T1/T2: quanto o maior `t_local` excede a média, em % (0% = perfeito) |
+| `desbal` | desbalanceamento, a mesma métrica do T1/T2: quanto o maior `t_local` excede a média, em % (0% = perfeito). Na híbrida, calculado entre todas as threads de todos os processos |
 | `checksum` | impressão digital do resultado; **tem que ser igual para qualquer número de processos** |
 | `inundadas` | células com água presa |
 | `volume` | soma das profundidades (m × célula) |

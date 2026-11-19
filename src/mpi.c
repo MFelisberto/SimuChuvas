@@ -96,42 +96,6 @@ static void anim_close(Anim *A)
     free(A->buf); free(A->all); free(A->cnt); free(A->dsp);
 }
 
-/*
- * Divide as R linhas do mapa em np faixas consecutivas.
- *   igual (padrão): o mesmo número de linhas em cada faixa;
- *   balanceada (-b): o mesmo número de CÉLULAS COM DADO em cada faixa. Linhas com muito
- *   oceano ou país vizinho ("sem dado", que quase não custam nada) ficam em faixas mais
- *   altas, e linhas só com terra em faixas mais baixas.
- * Cada linha pesa (células com dado + 1), para linhas vazias também serem distribuídas.
- */
-static void divide_faixas(const float *Z, long R, long C, int np, int balance, long *inicio)
-{
-    inicio[0] = 0; inicio[np] = R;
-    if (!balance) {
-        for (int r = 1; r < np; r++) inicio[r] = (long)r * R / np;
-        return;
-    }
-    double total = 0;
-    double *peso = malloc(sizeof(double) * R);
-    for (long i = 0; i < R; i++) {
-        long n = 0;
-        for (long j = 0; j < C; j++) n += (Z[i * C + j] > NODATA_Z);
-        peso[i] = (double)n + 1.0;
-        total += peso[i];
-    }
-    double acum = 0;
-    long i = 0;
-    for (int r = 1; r < np; r++) {
-        double alvo = total * r / np;              /* a faixa r começa quando o acumulado passa daqui */
-        while (i < R && acum + peso[i] <= alvo) acum += peso[i++];
-        long min_i = inicio[r - 1] + 1;            /* toda faixa tem pelo menos 1 linha */
-        long max_i = R - (np - r);                 /* e sobra pelo menos 1 linha para cada faixa seguinte */
-        inicio[r] = i < min_i ? min_i : (i > max_i ? max_i : i);
-        while (i < inicio[r]) acum += peso[i++];
-    }
-    free(peso);
-}
-
 int main(int argc, char **argv)
 {
     MPI_Init(&argc, &argv);
@@ -275,7 +239,7 @@ int main(int argc, char **argv)
 
     if (rank == 0) {
         print_header();
-        print_result("mpi", np, &p, rounds, sw_total,
+        print_result("mpi", np, 1, &p, rounds, sw_total,
                      tmax[0], tmax[1], tmax[2], tmax[3], desbal, &g);
     }
 
